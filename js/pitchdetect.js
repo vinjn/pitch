@@ -42,6 +42,15 @@ var detectorElem,
 window.onload = function() {
 	audioContext = new AudioContext();
 	MAX_SIZE = Math.max(4,Math.floor(audioContext.sampleRate/5000));	// corresponds to a 5kHz signal
+	var request = new XMLHttpRequest();
+	request.open("GET", "whistling3.ogg", true);
+	request.responseType = "arraybuffer";
+	request.onload = function() {
+	  audioContext.decodeAudioData( request.response, function(buffer) { 
+	    	theBuffer = buffer;
+		} );
+	}
+	request.send();
 
 	detectorElem = document.getElementById( "detector" );
 	canvasElem = document.getElementById( "output" );
@@ -78,49 +87,36 @@ window.onload = function() {
 	  	reader.readAsArrayBuffer(e.dataTransfer.files[0]);
 	  	return false;
 	};
-	
-	fetch('whistling3.ogg')
-		.then((response) => {
-			if (!response.ok) {
-				throw new Error(`HTTP error, status = ${response.status}`);
-			}
-			return response.arrayBuffer();
-		}).then((buffer) => audioContext.decodeAudioData(buffer)).then((decodedData) => {
-			theBuffer = decodedData;
-		});
+
+
 
 }
 
-function startPitchDetect() {	
-    // grab an audio context
-    audioContext = new AudioContext();
+function error() {
+    alert('Stream generation failed.');
+}
 
-    // Attempt to get audio input
-    navigator.mediaDevices.getUserMedia(
-    {
-        "audio": {
-            "mandatory": {
-                "googEchoCancellation": "false",
-                "googAutoGainControl": "false",
-                "googNoiseSuppression": "false",
-                "googHighpassFilter": "false"
-            },
-            "optional": []
-        },
-    }).then((stream) => {
-        // Create an AudioNode from the stream.
-        mediaStreamSource = audioContext.createMediaStreamSource(stream);
+function getUserMedia(dictionary, callback) {
+    try {
+        navigator.getUserMedia = 
+        	navigator.getUserMedia ||
+        	navigator.webkitGetUserMedia ||
+        	navigator.mozGetUserMedia;
+        navigator.getUserMedia(dictionary, callback, error);
+    } catch (e) {
+        alert('getUserMedia threw exception :' + e);
+    }
+}
 
-	    // Connect it to the destination.
-	    analyser = audioContext.createAnalyser();
-	    analyser.fftSize = 2048;
-	    mediaStreamSource.connect( analyser );
-	    updatePitch();
-    }).catch((err) => {
-        // always check for errors at the end.
-        console.error(`${err.name}: ${err.message}`);
-        alert('Stream generation failed.');
-    });
+function gotStream(stream) {
+    // Create an AudioNode from the stream.
+    mediaStreamSource = audioContext.createMediaStreamSource(stream);
+
+    // Connect it to the destination.
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    mediaStreamSource.connect( analyser );
+    updatePitch();
 }
 
 function toggleOscillator() {
@@ -160,7 +156,7 @@ function toggleLiveInput() {
 			window.cancelAnimationFrame = window.webkitCancelAnimationFrame;
         window.cancelAnimationFrame( rafID );
     }
-    navigator.mediaDevices.getUserMedia(
+    getUserMedia(
     	{
             "audio": {
                 "mandatory": {
@@ -205,7 +201,7 @@ function togglePlayback() {
 
 var rafID = null;
 var tracks = null;
-var buflen = 2048;
+var buflen = 1024;
 var buf = new Float32Array( buflen );
 
 var noteStrings = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -223,10 +219,43 @@ function centsOffFromPitch( frequency, note ) {
 	return Math.floor( 1200 * Math.log( frequency / frequencyFromNoteNumber( note ))/Math.log(2) );
 }
 
-// this is the previously used pitch detection algorithm.
+// this is a float version of the algorithm below - but it's not currently used.
 /*
+function autoCorrelateFloat( buf, sampleRate ) {
+	var MIN_SAMPLES = 4;	// corresponds to an 11kHz signal
+	var MAX_SAMPLES = 1000; // corresponds to a 44Hz signal
+	var SIZE = 1000;
+	var best_offset = -1;
+	var best_correlation = 0;
+	var rms = 0;
+
+	if (buf.length < (SIZE + MAX_SAMPLES - MIN_SAMPLES))
+		return -1;  // Not enough data
+
+	for (var i=0;i<SIZE;i++)
+		rms += buf[i]*buf[i];
+	rms = Math.sqrt(rms/SIZE);
+
+	for (var offset = MIN_SAMPLES; offset <= MAX_SAMPLES; offset++) {
+		var correlation = 0;
+
+		for (var i=0; i<SIZE; i++) {
+			correlation += Math.abs(buf[i]-buf[i+offset]);
+		}
+		correlation = 1 - (correlation/SIZE);
+		if (correlation > best_correlation) {
+			best_correlation = correlation;
+			best_offset = offset;
+		}
+	}
+	if ((rms>0.1)&&(best_correlation > 0.1)) {
+		console.log("f = " + sampleRate/best_offset + "Hz (rms: " + rms + " confidence: " + best_correlation + ")");
+	}
+//	var best_frequency = sampleRate/best_offset;
+}
+*/
+
 var MIN_SAMPLES = 0;  // will be initialized when AudioContext is created.
-var GOOD_ENOUGH_CORRELATION = 0.9; // this is the "bar" for how close a correlation needs to be
 
 function autoCorrelate( buf, sampleRate ) {
 	var SIZE = buf.length;
@@ -254,7 +283,7 @@ function autoCorrelate( buf, sampleRate ) {
 		}
 		correlation = 1 - (correlation/MAX_SAMPLES);
 		correlations[offset] = correlation; // store it, for the tweaking we need to do below.
-		if ((correlation>GOOD_ENOUGH_CORRELATION) && (correlation > lastCorrelation)) {
+		if ((correlation>0.9) && (correlation > lastCorrelation)) {
 			foundGoodCorrelation = true;
 			if (correlation > best_correlation) {
 				best_correlation = correlation;
@@ -281,52 +310,6 @@ function autoCorrelate( buf, sampleRate ) {
 	}
 	return -1;
 //	var best_frequency = sampleRate/best_offset;
-}
-*/
-
-function autoCorrelate( buf, sampleRate ) {
-	// Implements the ACF2+ algorithm
-	var SIZE = buf.length;
-	var rms = 0;
-
-	for (var i=0;i<SIZE;i++) {
-		var val = buf[i];
-		rms += val*val;
-	}
-	rms = Math.sqrt(rms/SIZE);
-	if (rms<0.01) // not enough signal
-		return -1;
-
-	var r1=0, r2=SIZE-1, thres=0.2;
-	for (var i=0; i<SIZE/2; i++)
-		if (Math.abs(buf[i])<thres) { r1=i; break; }
-	for (var i=1; i<SIZE/2; i++)
-		if (Math.abs(buf[SIZE-i])<thres) { r2=SIZE-i; break; }
-
-	buf = buf.slice(r1,r2);
-	SIZE = buf.length;
-
-	var c = new Array(SIZE).fill(0);
-	for (var i=0; i<SIZE; i++)
-		for (var j=0; j<SIZE-i; j++)
-			c[i] = c[i] + buf[j]*buf[j+i];
-
-	var d=0; while (c[d]>c[d+1]) d++;
-	var maxval=-1, maxpos=-1;
-	for (var i=d; i<SIZE; i++) {
-		if (c[i] > maxval) {
-			maxval = c[i];
-			maxpos = i;
-		}
-	}
-	var T0 = maxpos;
-
-	var x1=c[T0-1], x2=c[T0], x3=c[T0+1];
-	a = (x1 + x3 - 2*x2)/2;
-	b = (x3 - x1)/2;
-	if (a) T0 = T0 - b/(2*a);
-
-	return sampleRate/T0;
 }
 
 function updatePitch( time ) {
