@@ -160,7 +160,7 @@ function toggleLiveInput() {
 			window.cancelAnimationFrame = window.webkitCancelAnimationFrame;
         window.cancelAnimationFrame( rafID );
     }
-    getUserMedia(
+    navigator.mediaDevices.getUserMedia(
     	{
             "audio": {
                 "mandatory": {
